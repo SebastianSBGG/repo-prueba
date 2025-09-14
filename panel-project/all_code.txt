@@ -1,77 +1,129 @@
-# ===================================================================
-# GUÍA COMPLETA Y DEFINITIVA PARA EL PANEL DE CONTROL
-# ===================================================================
-# Sigue estos pasos en orden. Los he verificado y corregido para que
-# funcionen con la estructura de directorios correcta.
-# Trabaja siempre desde la terminal SSH de tu servidor.
+# GUÍA AVANZADA Y DEFINITIVA PARA EL PANEL DE CONTROL (Node.js + Nginx + Cloudflare)
 
-# -------------------------------------------------------------------
-# PASO 1: NAVEGAR AL DIRECTORIO DEL PROYECTO
-# -------------------------------------------------------------------
-# Todos los comandos se deben ejecutar desde esta carpeta.
+> Arquitectura objetivo: **Cliente** → **Cloudflare (Proxy + WAF + Turnstile)** → **Nginx (Reverse Proxy)** → **Node.js/Express (Panel)** → **SQLite** → **Resend** (emails)
 
-cd /app/panel-project
-echo "Estás en el directorio correcto. ¡Comencemos!"
+---
 
+## 0) Prerrequisitos y seguridad base
 
-# -------------------------------------------------------------------
-# PASO 2: INSTALACIÓN DE DEPENDENCIAS DEL SISTEMA Y NODE
-# -------------------------------------------------------------------
-# Instalaremos Nginx, Certbot y todas las librerías de Node.js.
+* **DNS** en Cloudflare:
 
-# Actualiza el sistema e instala Nginx
-sudo apt-get update
-sudo apt-get install -y nginx
+  * `panel.cloudevx.space` apuntando a la IP de tu VPS. (Puedes dejar el proxy naranja activado).
+* **Firewall** (Ubuntu):
 
-# Instala Certbot (para SSL)
-sudo snap install --classic certbot
-sudo ln -s /snap/bin/certbot /usr/bin/certbot
+  ```bash
+  sudo apt-get update && sudo apt-get upgrade -y
+  sudo apt-get install -y ufw fail2ban
+  sudo ufw allow OpenSSH
+  sudo ufw allow 'Nginx Full'
+  sudo ufw enable
+  ```
+* **Usuario no root** y SSH con clave pública (recomendado).
+* **Swap** (si VPS con poca RAM, p. ej. 1 GB):
 
-# Instala las dependencias de Node.js para el panel
-npm install express ejs bcrypt sqlite3 express-session connect-sqlite3 dotenv helmet resend crypto
+  ```bash
+  sudo fallocate -l 1G /swapfile
+  sudo chmod 600 /swapfile
+  sudo mkswap /swapfile
+  sudo swapon /swapfile
+  echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+  ```
 
-echo "Dependencias instaladas."
+---
 
+## 1) Preparar Node.js (LTS) y proyecto
 
-# -------------------------------------------------------------------
-# PASO 3: CREAR LA ESTRUCTURA DE CARPETAS
-# -------------------------------------------------------------------
-# Crearemos todas las carpetas que necesita el proyecto.
+```bash
+cd /app
+mkdir -p panel-project && cd panel-project
 
+# Node LTS con nvm
+curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
+export NVM_DIR="$HOME/.nvm"
+[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+
+nvm install --lts
+node -v
+npm -v
+
+npm init -y
+```
+
+### Dependencias del proyecto
+
+```bash
+npm install express ejs bcrypt sqlite3 express-session connect-sqlite3 dotenv helmet resend crypto \
+  express-rate-limit cookie-parser csurf validator
+```
+
+> Opcionales: `better-sqlite3` (rendimiento), `zxcvbn` (fuerza de contraseña), `pino` (logs estructurados).
+
+---
+
+## 2) Estructura de carpetas
+
+```bash
 mkdir -p views public/css var files
-echo "Estructura de carpetas creada."
+```
 
+* `var/` almacenará `database.db` y `sessions.db`.
+* **Añade** a `.gitignore`:
 
-# -------------------------------------------------------------------
-# PASO 4: CONFIGURAR LAS VARIABLES DE ENTORNO (.env)
-# -------------------------------------------------------------------
-# Este archivo guardará todos tus secretos.
-# Ejecuta `nano .env` y pega el siguiente contenido.
-# ¡¡IMPORTANTE!! Rellena tus claves reales.
+  ```
+  .env
+  var/*.db
+  var/*.db-*
+  ```
 
-# --- INICIO DEL CÓDIGO PARA .env ---
-# Clave secreta para la sesión (pon una cadena de texto larga y aleatoria)
-SESSION_SECRET=pon_aqui_algo_largo_y_secreto_como_una_frase_larga
+---
 
-# URL de tu aplicación (para los emails de reseteo)
-APP_URL=https://cloudevx.space
+## 3) Variables de entorno (`.env`)
 
-# Claves de Cloudflare Turnstile
+Crea `nano .env` y pega:
+
+```dotenv
+# ============================
+#  .env — cloudevx panel
+# ============================
+
+NODE_ENV=production
+PORT=3000
+APP_URL=https://panel.cloudevx.space
+
+# Sesiones (Express)
+SESSION_SECRET=REEMPLAZA_CON_OPENSLL_BASE64_LARGO
+SESSION_NAME=sid
+SESSION_TTL_HOURS=4
+COOKIE_DOMAIN=.cloudevx.space
+COOKIE_SECURE=true
+COOKIE_SAMESITE=lax
+TRUST_PROXY=1
+
+# Cloudflare Turnstile
 TURNSTILE_SITE_KEY=TU_SITE_KEY_DE_TURNSTILE_AQUI
 TURNSTILE_SECRET_KEY=TU_SECRET_KEY_DE_TURNSTILE_AQUI
 
-# Clave de Resend y email desde el que envías
+# Resend (emails)
 RESEND_API_KEY=TU_API_KEY_DE_RESEND_AQUI
-MAIL_FROM=no-reply@tu_dominio_verificado_en_resend.com
-# --- FIN DEL CÓDIGO PARA .env ---
+MAIL_FROM=no-reply@cloudevx.space
 
+# Rate limit (por defecto)
+RATE_LIMIT_WINDOW_MS=900000
+RATE_LIMIT_MAX_LOGIN=10
+RATE_LIMIT_MAX_REGISTER=10
+RATE_LIMIT_MAX_FORGOT=5
+```
 
-# -------------------------------------------------------------------
-# PASO 5: CREAR EL ARCHIVO DE ESTILOS CSS
-# -------------------------------------------------------------------
-# Ejecuta `nano public/css/style.css` y pega el siguiente código.
+> Genera `SESSION_SECRET` en el VPS: `openssl rand -base64 64`
 
-# --- INICIO DEL CÓDIGO PARA public/css/style.css ---
+---
+
+## 4) Estilos (oscuro + acento vino)
+
+`nano public/css/style.css`:
+
+```css
+:root{ --accent: #8a1538; }
 body {
   background-color: #121212;
   color: #e0e0e0;
@@ -87,270 +139,158 @@ body {
 .container {
   background-color: #1e1e1e;
   padding: 40px;
-  border-radius: 8px;
+  border-radius: 12px;
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
   width: 100%;
   max-width: 450px;
   text-align: center;
 }
-h1 {
-  color: #ffffff;
-  margin-bottom: 24px;
-}
-p {
-  margin-bottom: 16px;
-}
-input[type="text"],
-input[type="password"],
-input[type="email"] {
+h1 { color: #fff; margin-bottom: 24px; }
+p { margin-bottom: 16px; }
+input[type="text"], input[type="password"], input[type="email"] {
   width: 100%;
   padding: 12px;
   margin-bottom: 16px;
   background-color: #333;
   border: 1px solid #444;
-  border-radius: 4px;
+  border-radius: 6px;
   color: #e0e0e0;
   box-sizing: border-box;
 }
 button {
   width: 100%;
   padding: 12px;
-  background-color: #bb86fc;
-  color: #121212;
+  background-color: var(--accent);
+  color: #fff;
   border: none;
-  border-radius: 4px;
-  font-weight: bold;
+  border-radius: 6px;
+  font-weight: 600;
   cursor: pointer;
-  transition: background-color 0.3s;
+  transition: filter .2s ease;
   margin-top: 10px;
 }
-button:hover {
-  background-color: #a36ef4;
-}
-a {
-  color: #bb86fc;
-  text-decoration: none;
-  display: inline-block;
-  margin-top: 16px;
-}
-a:hover {
-  text-decoration: underline;
-}
-.turnstile-container {
-    margin: 20px 0;
-}
-.error, .success {
-    padding: 10px;
-    border-radius: 4px;
-    margin-bottom: 16px;
-}
-.error {
-    background-color: #cf6679;
-    color: #121212;
-}
-.success {
-    background-color: #03dac6;
-    color: #121212;
-}
-.dashboard-nav {
-    margin-bottom: 20px;
-}
-.dashboard-nav a {
-    margin: 0 15px;
-}
-# --- FIN DEL CÓDIGO PARA public/css/style.css ---
+button:hover { filter: brightness(1.1); }
+a { color: var(--accent); text-decoration: none; display: inline-block; margin-top: 16px; }
+a:hover { text-decoration: underline; }
+.turnstile-container { margin: 20px 0; }
+.error, .success { padding: 10px; border-radius: 6px; margin-bottom: 16px; }
+.error { background-color: #cf6679; color: #121212; }
+.success { background-color: #03dac6; color: #121212; }
+.dashboard-nav { margin-bottom: 20px; }
+.dashboard-nav a { margin: 0 15px; }
+```
 
+---
 
-# -------------------------------------------------------------------
-# PASO 6: CREAR LAS VISTAS (ARCHIVOS .ejs)
-# -------------------------------------------------------------------
-# Crea cada uno de estos archivos dentro de la carpeta `views`.
+## 5) Vistas `EJS` (con CSRF + Turnstile donde aplica)
 
-# --- ARCHIVO 1: `views/register.ejs` ---
-# Ejecuta `nano views/register.ejs` y pega esto:
-<!DOCTYPE html>
-<html lang="es">
-<head>
-    <meta charset="UTF-8">
-    <title>Registro - Panel</title>
-    <link rel="stylesheet" href="/css/style.css">
-    <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
-</head>
-<body>
-    <div class="container">
-        <h1>Crear una cuenta</h1>
-        <% if (locals.error) { %>
-            <div class="error"><%= error %></div>
-        <% } %>
-        <form action="/register" method="POST">
-            <input type="email" name="email" placeholder="Email" required>
-            <input type="password" name="password" placeholder="Contraseña" required>
-            <div class="turnstile-container">
-                <div class="cf-turnstile" data-sitekey="<%= turnstileSiteKey %>"></div>
-            </div>
-            <button type="submit">Registrarse</button>
-        </form>
-        <a href="/login">¿Ya tienes una cuenta? Inicia sesión</a>
+**5.1 `views/register.ejs`**
+
+```html
+<!DOCTYPE html><html lang="es"><head>
+<meta charset="UTF-8"><title>Registro - Panel</title>
+<link rel="stylesheet" href="/css/style.css">
+<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
+</head><body><div class="container">
+  <h1>Crear una cuenta</h1>
+  <% if (locals.error) { %><div class="error"><%= error %></div><% } %>
+  <form action="/register" method="POST">
+    <input type="hidden" name="_csrf" value="<%= csrfToken %>">
+    <input type="email" name="email" placeholder="Email" required>
+    <input type="password" name="password" placeholder="Contraseña" required>
+    <div class="turnstile-container">
+      <div class="cf-turnstile" data-sitekey="<%= turnstileSiteKey %>"></div>
     </div>
-</body>
-</html>
+    <button type="submit">Registrarse</button>
+  </form>
+  <a href="/login">¿Ya tienes una cuenta? Inicia sesión</a>
+</div></body></html>
+```
 
-# --- ARCHIVO 2: `views/login.ejs` ---
-# Ejecuta `nano views/login.ejs` y pega esto:
-<!DOCTYPE html>
-<html lang="es">
-<head>
-    <meta charset="UTF-8">
-    <title>Login - Panel</title>
-    <link rel="stylesheet" href="/css/style.css">
-    <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
-</head>
-<body>
-    <div class="container">
-        <h1>Iniciar Sesión</h1>
-        <% if (locals.error) { %>
-            <div class="error"><%= error %></div>
-        <% } %>
-        <% if (locals.success) { %>
-            <div class="success"><%= success %></div>
-        <% } %>
-        <form action="/login" method="POST">
-            <input type="email" name="email" placeholder="Email" required>
-            <input type="password" name="password" placeholder="Contraseña" required>
-            <div class="turnstile-container">
-                <div class="cf-turnstile" data-sitekey="<%= turnstileSiteKey %>"></div>
-            </div>
-            <button type="submit">Entrar</button>
-        </form>
-        <a href="/register">Crear una cuenta</a>
-        <a href="/forgot">¿Olvidaste tu contraseña?</a>
+**5.2 `views/login.ejs`**
+
+```html
+<!DOCTYPE html><html lang="es"><head>
+<meta charset="UTF-8"><title>Login - Panel</title>
+<link rel="stylesheet" href="/css/style.css">
+<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
+</head><body><div class="container">
+  <h1>Iniciar Sesión</h1>
+  <% if (locals.error) { %><div class="error"><%= error %></div><% } %>
+  <% if (locals.success) { %><div class="success"><%= success %></div><% } %>
+  <form action="/login" method="POST">
+    <input type="hidden" name="_csrf" value="<%= csrfToken %>">
+    <input type="email" name="email" placeholder="Email" required>
+    <input type="password" name="password" placeholder="Contraseña" required>
+    <div class="turnstile-container">
+      <div class="cf-turnstile" data-sitekey="<%= turnstileSiteKey %>"></div>
     </div>
-</body>
-</html>
+    <button type="submit">Entrar</button>
+  </form>
+  <a href="/register">Crear una cuenta</a>
+  <a href="/forgot">¿Olvidaste tu contraseña?</a>
+</div></body></html>
+```
 
-# --- ARCHIVO 3: `views/forgot.ejs` ---
-# Ejecuta `nano views/forgot.ejs` y pega esto:
-<!DOCTYPE html>
-<html lang="es">
-<head>
-    <meta charset="UTF-8">
-    <title>Recuperar Contraseña</title>
-    <link rel="stylesheet" href="/css/style.css">
-</head>
-<body>
-    <div class="container">
-        <h1>Recuperar Contraseña</h1>
-        <p>Ingresa tu email y te enviaremos un enlace para resetear tu contraseña.</p>
-        <% if (locals.error) { %><div class="error"><%= error %></div><% } %>
-        <% if (locals.success) { %><div class="success"><%= success %></div><% } %>
-        <form action="/forgot" method="POST">
-            <input type="email" name="email" placeholder="Tu email registrado" required>
-            <button type="submit">Enviar enlace</button>
-        </form>
-        <a href="/login">Volver a inicio de sesión</a>
-    </div>
-</body>
-</html>
+**5.3 `views/forgot.ejs`** (con CSRF)
 
-# --- ARCHIVO 4: `views/reset.ejs` ---
-# Ejecuta `nano views/reset.ejs` y pega esto:
-<!DOCTYPE html>
-<html lang="es">
-<head>
-    <meta charset="UTF-8">
-    <title>Resetear Contraseña</title>
-    <link rel="stylesheet" href="/css/style.css">
-</head>
-<body>
-    <div class="container">
-        <h1>Crear nueva contraseña</h1>
-        <% if (locals.error) { %><div class="error"><%= error %></div><% } %>
-        <form action="/reset/<%= token %>" method="POST">
-            <input type="password" name="password" placeholder="Nueva contraseña" required>
-            <button type="submit">Guardar contraseña</button>
-        </form>
-    </div>
-</body>
-</html>
+```html
+<!DOCTYPE html><html lang="es"><head>
+<meta charset="UTF-8"><title>Recuperar Contraseña</title>
+<link rel="stylesheet" href="/css/style.css"></head>
+<body><div class="container">
+  <h1>Recuperar Contraseña</h1>
+  <p>Ingresa tu email y te enviaremos un enlace para resetear tu contraseña.</p>
+  <% if (locals.error) { %><div class="error"><%= error %></div><% } %>
+  <% if (locals.success) { %><div class="success"><%= success %></div><% } %>
+  <form action="/forgot" method="POST">
+    <input type="hidden" name="_csrf" value="<%= csrfToken %>">
+    <input type="email" name="email" placeholder="Tu email registrado" required>
+    <button type="submit">Enviar enlace</button>
+  </form>
+  <a href="/login">Volver a inicio de sesión</a>
+</div></body></html>
+```
 
-# --- ARCHIVO 5: `views/dashboard.ejs` ---
-# Ejecuta `nano views/dashboard.ejs` y pega esto:
-<!DOCTYPE html>
-<html lang="es">
-<head>
-    <meta charset="UTF-8">
-    <title>Dashboard</title>
-    <link rel="stylesheet" href="/css/style.css">
-</head>
-<body>
-    <div class="container">
-        <h1>Bienvenido, <%= user.email %></h1>
-        <nav class="dashboard-nav">
-            <a href="/logout">Salir</a>
-        </nav>
-        <p>Este es tu panel de control. Próximamente: ¡Consola y administrador de archivos!</p>
-    </div>
-</body>
-</html>
+**5.4 `views/reset.ejs`** (con CSRF)
 
+```html
+<!DOCTYPE html><html lang="es"><head>
+<meta charset="UTF-8"><title>Resetear Contraseña</title>
+<link rel="stylesheet" href="/css/style.css"></head>
+<body><div class="container">
+  <h1>Crear nueva contraseña</h1>
+  <% if (locals.error) { %><div class="error"><%= error %></div><% } %>
+  <form action="/reset/<%= token %>" method="POST">
+    <input type="hidden" name="_csrf" value="<%= csrfToken %>">
+    <input type="password" name="password" placeholder="Nueva contraseña" required>
+    <button type="submit">Guardar contraseña</button>
+  </form>
+</div></body></html>
+```
 
-# -------------------------------------------------------------------
-# PASO 7: CONFIGURAR NGINX COMO PROXY INVERSO
-# -------------------------------------------------------------------
-# Esto conectará tu dominio a tu aplicación Node.js.
+**5.5 `views/dashboard.ejs`**
 
-# Crea el archivo de configuración de Nginx para tu dominio:
-# `sudo nano /etc/nginx/sites-available/cloudevx.space`
-# Pega este contenido DENTRO de ese archivo:
+```html
+<!DOCTYPE html><html lang="es"><head>
+<meta charset="UTF-8"><title>Dashboard</title>
+<link rel="stylesheet" href="/css/style.css"></head>
+<body><div class="container">
+  <h1>Bienvenido, <%= user.email %></h1>
+  <nav class="dashboard-nav">
+    <a href="/logout">Salir</a>
+  </nav>
+  <p>Este es tu panel de control. Próximamente: consola y administrador de archivos.</p>
+</div></body></html>
+```
 
-# --- INICIO DEL CÓDIGO PARA /etc/nginx/sites-available/cloudevx.space ---
-server {
-    server_name cloudevx.space www.cloudevx.space;
+---
 
-    location / {
-        proxy_pass http://localhost:3000; # Apunta a tu app de Node
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
+## 6) Código principal `app.js` (endurecido)
 
-    listen 80;
-    listen [::]:80;
-}
-# --- FIN DEL CÓDIGO PARA /etc/nginx/sites-available/cloudevx.space ---
+`nano app.js` y pega **todo**:
 
-# Activa el nuevo sitio y borra la configuración por defecto si existe:
-sudo ln -s /etc/nginx/sites-available/cloudevx.space /etc/nginx/sites-enabled/
-sudo rm /etc/nginx/sites-enabled/default
-
-# Verifica que la sintaxis es correcta:
-sudo nginx -t
-
-# Reinicia Nginx para aplicar los cambios:
-sudo systemctl restart nginx
-
-
-# -------------------------------------------------------------------
-# PASO 8: OBTENER EL CERTIFICADO SSL CON CERTBOT
-# -------------------------------------------------------------------
-# Esto hará que tu sitio sea seguro (HTTPS).
-
-# Reemplaza tu-email@ejemplo.com con tu email real
-sudo certbot --nginx -d cloudevx.space -d www.cloudevx.space --non-interactive --agree-tos -m tu-email@ejemplo.com --redirect
-
-# Certbot configurará Nginx automáticamente. Reiniciamos para asegurar:
-sudo systemctl restart nginx
-echo "¡Nginx y SSL configurados!"
-
-
-# -------------------------------------------------------------------
-# PASO 9: EL CÓDIGO PRINCIPAL DE LA APLICACIÓN (app.js)
-# -------------------------------------------------------------------
-# Este es el cerebro de todo el panel.
-# Ejecuta `nano app.js` y pega TODO el siguiente código.
-
-# --- INICIO DEL CÓDIGO PARA app.js ---
+```js
 require('dotenv').config();
 const express = require('express');
 const path = require('path');
@@ -361,187 +301,412 @@ const SQLiteStore = require('connect-sqlite3')(session);
 const { Resend } = require('resend');
 const crypto = require('crypto');
 const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
+const cookieParser = require('cookie-parser');
+const csrf = require('csurf');
+const validator = require('validator');
 
 const app = express();
-const port = 3000;
+const PORT = Number(process.env.PORT || 3000);
 const resend = new Resend(process.env.RESEND_API_KEY);
 
-// --- Database Setup ---
-const db = new sqlite3.Database('./var/database.db', (err) => {
-    if (err) console.error(err.message);
-    else console.log('Connected to the SQLite database.');
+// --- Trust Proxy ---
+app.set('trust proxy', Number(process.env.TRUST_PROXY || 0));
+
+// --- DB ---
+const DB_PATH = path.join(__dirname, 'var', 'database.db');
+const db = new sqlite3.Database(DB_PATH, (err) => {
+  if (err) console.error('DB error:', err.message);
+  else console.log('SQLite OK ->', DB_PATH);
 });
 
 db.serialize(() => {
-    db.run(`CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        email TEXT UNIQUE NOT NULL,
-        password TEXT NOT NULL,
-        resetToken TEXT,
-        resetTokenExpires INTEGER
-    )`);
+  db.run('PRAGMA journal_mode = WAL;');
+  db.run('PRAGMA busy_timeout = 3000;');
+  db.run(`CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    email TEXT UNIQUE NOT NULL,
+    password TEXT NOT NULL,
+    resetToken TEXT,
+    resetTokenExpires INTEGER
+  )`);
 });
 
 // --- Middlewares ---
 app.set('view engine', 'ejs');
 app.set('views', path.join(__dirname, 'views'));
-app.use(express.static(path.join(__dirname, 'public')));
+app.use(express.static(path.join(__dirname, 'public'), { maxAge: '7d', etag: true }));
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
-app.use(helmet({ contentSecurityPolicy: false }));
 
-app.use(session({
-    store: new SQLiteStore({ db: 'sessions.db', dir: './var' }),
-    secret: process.env.SESSION_SECRET,
-    resave: false,
-    saveUninitialized: false,
-    cookie: { httpOnly: true, secure: 'auto', maxAge: 7 * 24 * 60 * 60 * 1000 }
+// Helmet con CSP para Turnstile
+app.use(helmet({
+  contentSecurityPolicy: {
+    useDefaults: true,
+    directives: {
+      "default-src": ["'self'"],
+      "script-src": ["'self'", "https://challenges.cloudflare.com"],
+      "style-src": ["'self'", "'unsafe-inline'"],
+      "img-src": ["'self'", 'data:'],
+      "connect-src": ["'self'"],
+      "frame-src": ["'self'", "https://challenges.cloudflare.com"],
+      "object-src": ["'none'"]
+    }
+  },
+  referrerPolicy: { policy: 'no-referrer' }
 }));
 
+app.use(cookieParser());
+
+app.use(session({
+  store: new SQLiteStore({ db: 'sessions.db', dir: path.join(__dirname, 'var') }),
+  secret: process.env.SESSION_SECRET,
+  name: process.env.SESSION_NAME || 'sid',
+  resave: false,
+  saveUninitialized: false,
+  cookie: {
+    httpOnly: true,
+    secure: String(process.env.COOKIE_SECURE) === 'true',
+    sameSite: process.env.COOKIE_SAMESITE || 'lax',
+    maxAge: (Number(process.env.SESSION_TTL_HOURS || 4)) * 60 * 60 * 1000,
+    domain: process.env.COOKIE_DOMAIN || undefined
+  }
+}));
+
+// CSRF (para formularios)
+const csrfProtection = csrf({ cookie: true });
+
+// Rate limiters
+const loginLimiter = rateLimit({
+  windowMs: Number(process.env.RATE_LIMIT_WINDOW_MS || 900000),
+  max: Number(process.env.RATE_LIMIT_MAX_LOGIN || 10),
+  standardHeaders: true,
+  legacyHeaders: false
+});
+const registerLimiter = rateLimit({
+  windowMs: Number(process.env.RATE_LIMIT_WINDOW_MS || 900000),
+  max: Number(process.env.RATE_LIMIT_MAX_REGISTER || 10),
+  standardHeaders: true,
+  legacyHeaders: false
+});
+const forgotLimiter = rateLimit({
+  windowMs: Number(process.env.RATE_LIMIT_WINDOW_MS || 900000),
+  max: Number(process.env.RATE_LIMIT_MAX_FORGOT || 5),
+  standardHeaders: true,
+  legacyHeaders: false
+});
+
+// Turnstile verify middleware
 async function verifyTurnstile(req, res, next) {
-    const token = req.body['cf-turnstile-response'];
-    if (!token) {
-        return res.status(400).render('login', { error: 'Por favor, completa el captcha.', turnstileSiteKey: process.env.TURNSTILE_SITE_KEY, success: null });
+  const token = req.body['cf-turnstile-response'];
+  const fail = (msg) => res.status(400).render('login', { error: msg, success: null, csrfToken: req.csrfToken(), turnstileSiteKey: process.env.TURNSTILE_SITE_KEY });
+  if (!token) return fail('Completa el desafío de seguridad.');
+  try {
+    const controller = new AbortController();
+    const id = setTimeout(() => controller.abort(), 5000);
+    const body = new URLSearchParams({
+      secret: process.env.TURNSTILE_SECRET_KEY,
+      response: token,
+      remoteip: req.ip || ''
+    });
+    const r = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body,
+      signal: controller.signal
+    });
+    clearTimeout(id);
+    const data = await r.json();
+    if (!data.success) return fail('Verificación fallida. Intenta de nuevo.');
+    // (Opcional) validar hostname devuelto por Turnstile
+    if (data.hostname) {
+      const allowed = new Set(['cloudevx.space', 'panel.cloudevx.space']);
+      if (!allowed.has(data.hostname)) return fail('Origen no autorizado.');
     }
-    const ip = req.ip;
-    let formData = new FormData();
-    formData.append('secret', process.env.TURNSTILE_SECRET_KEY);
-    formData.append('response', token);
-    formData.append('remoteip', ip);
-    try {
-        const response = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
-            method: 'POST',
-            body: formData,
-        });
-        const data = await response.json();
-        if (data.success) {
-            next();
-        } else {
-            res.status(400).render('login', { error: 'Verificación de captcha fallida. Intenta de nuevo.', turnstileSiteKey: process.env.TURNSTILE_SITE_KEY, success: null });
-        }
-    } catch (error) {
-        res.status(500).render('login', { error: 'Error verificando el captcha.', turnstileSiteKey: process.env.TURNSTILE_SITE_KEY, success: null });
+    // (Opcional) ventana de frescura 5 min
+    if (data.challenge_ts) {
+      const age = Date.now() - new Date(data.challenge_ts).getTime();
+      if (age > 5 * 60 * 1000) return fail('Token caducado. Refresca e inténtalo de nuevo.');
     }
+    return next();
+  } catch (e) {
+    return fail('Error verificando el desafío.');
+  }
 }
 
 function isAuthenticated(req, res, next) {
-    if (req.session.userId) {
-        next();
-    } else {
-        res.redirect('/login');
-    }
+  if (req.session.userId) return next();
+  return res.redirect('/login');
 }
 
 // --- Routes ---
 app.get('/', (req, res) => {
-    if (req.session.userId) res.redirect('/dashboard');
-    else res.redirect('/login');
+  if (req.session.userId) return res.redirect('/dashboard');
+  return res.redirect('/login');
 });
 
-app.get('/register', (req, res) => res.render('register', { turnstileSiteKey: process.env.TURNSTILE_SITE_KEY, error: null }));
+app.get('/register', csrfProtection, (req, res) =>
+  res.render('register', { turnstileSiteKey: process.env.TURNSTILE_SITE_KEY, error: null, csrfToken: req.csrfToken() })
+);
 
-app.post('/register', verifyTurnstile, async (req, res) => {
-    const { email, password } = req.body;
-    if (!email || !password) return res.status(400).render('register', { error: 'Email y contraseña son requeridos.', turnstileSiteKey: process.env.TURNSTILE_SITE_KEY });
-    try {
-        const hashedPassword = await bcrypt.hash(password, 10);
-        db.run('INSERT INTO users (email, password) VALUES (?, ?)', [email, hashedPassword], (err) => {
-            if (err) return res.status(400).render('register', { error: 'El email ya está en uso.', turnstileSiteKey: process.env.TURNSTILE_SITE_KEY });
-            res.redirect('/login');
-        });
-    } catch (e) {
-        res.status(500).render('register', { error: 'Error en el servidor.', turnstileSiteKey: process.env.TURNSTILE_SITE_KEY });
-    }
-});
-
-app.get('/login', (req, res) => res.render('login', { turnstileSiteKey: process.env.TURNSTILE_SITE_KEY, error: null, success: req.query.success }));
-
-app.post('/login', verifyTurnstile, (req, res) => {
-    const { email, password } = req.body;
-    db.get('SELECT * FROM users WHERE email = ?', [email], async (err, user) => {
-        if (err || !user || !await bcrypt.compare(password, user.password)) {
-            return res.status(401).render('login', { error: 'Email o contraseña incorrectos.', turnstileSiteKey: process.env.TURNSTILE_SITE_KEY, success: null });
-        }
-        req.session.userId = user.id;
-        req.session.userEmail = user.email;
-        res.redirect('/dashboard');
+app.post('/register', registerLimiter, csrfProtection, verifyTurnstile, async (req, res) => {
+  const { email, password } = req.body;
+  const renderErr = (msg) => res.status(400).render('register', { error: msg, turnstileSiteKey: process.env.TURNSTILE_SITE_KEY, csrfToken: req.csrfToken() });
+  if (!validator.isEmail(String(email))) return renderErr('Email inválido.');
+  if (!password || String(password).length < 8) return renderErr('La contraseña debe tener al menos 8 caracteres.');
+  try {
+    const hashed = await bcrypt.hash(password, 12);
+    db.run('INSERT INTO users (email, password) VALUES (?, ?)', [email, hashed], (err) => {
+      if (err) return renderErr('El email ya está en uso.');
+      return res.redirect('/login?success=Cuenta+creada');
     });
+  } catch (e) {
+    return renderErr('Error en el servidor.');
+  }
+});
+
+app.get('/login', csrfProtection, (req, res) =>
+  res.render('login', { turnstileSiteKey: process.env.TURNSTILE_SITE_KEY, error: null, success: req.query.success, csrfToken: req.csrfToken() })
+);
+
+app.post('/login', loginLimiter, csrfProtection, verifyTurnstile, (req, res) => {
+  const { email, password } = req.body;
+  db.get('SELECT * FROM users WHERE email = ?', [email], async (err, user) => {
+    if (err || !user) return res.status(401).render('login', { error: 'Email o contraseña incorrectos.', turnstileSiteKey: process.env.TURNSTILE_SITE_KEY, success: null, csrfToken: req.csrfToken() });
+    const ok = await bcrypt.compare(password, user.password);
+    if (!ok) return res.status(401).render('login', { error: 'Email o contraseña incorrectos.', turnstileSiteKey: process.env.TURNSTILE_SITE_KEY, success: null, csrfToken: req.csrfToken() });
+    req.session.userId = user.id;
+    req.session.userEmail = user.email;
+    return res.redirect('/dashboard');
+  });
 });
 
 app.get('/logout', (req, res) => {
-    req.session.destroy(() => res.redirect('/login'));
+  req.session.destroy(() => res.redirect('/login'));
 });
 
-app.get('/forgot', (req, res) => res.render('forgot', { error: null, success: null }));
+app.get('/forgot', csrfProtection, (req, res) =>
+  res.render('forgot', { error: null, success: null, csrfToken: req.csrfToken() })
+);
 
-app.post('/forgot', async (req, res) => {
-    const { email } = req.body;
-    db.get('SELECT * FROM users WHERE email = ?', [email], async (err, user) => {
-        if (!user) return res.render('forgot', { success: 'Si el email existe en nuestra base de datos, se ha enviado un enlace.', error: null });
-        const token = crypto.randomBytes(32).toString('hex');
-        const expires = Date.now() + 3600000; // 1 hour
-        db.run('UPDATE users SET resetToken = ?, resetTokenExpires = ? WHERE email = ?', [token, expires, email]);
-        const resetURL = `${process.env.APP_URL}/reset/${token}`;
-        try {
-            await resend.emails.send({ from: process.env.MAIL_FROM, to: user.email, subject: 'Reseteo de contraseña', html: `Haz clic <a href="${resetURL}">aquí</a> para resetear tu contraseña.` });
-            res.render('forgot', { success: 'Si el email existe, se ha enviado un enlace.', error: null });
-        } catch (error) {
-            res.render('forgot', { error: 'Error al enviar el email.', success: null });
-        }
-    });
+app.post('/forgot', forgotLimiter, csrfProtection, async (req, res) => {
+  const { email } = req.body;
+  db.get('SELECT * FROM users WHERE email = ?', [email], async (err, user) => {
+    const successMsg = 'Si el email existe, se ha enviado un enlace.';
+    if (!user) return res.render('forgot', { success: successMsg, error: null, csrfToken: req.csrfToken() });
+    const token = crypto.randomBytes(32).toString('hex');
+    const expires = Date.now() + 3600000; // 1 hora
+    db.run('UPDATE users SET resetToken = ?, resetTokenExpires = ? WHERE email = ?', [token, expires, email]);
+    const resetURL = `${process.env.APP_URL}/reset/${token}`;
+    try {
+      await resend.emails.send({
+        from: process.env.MAIL_FROM,
+        to: user.email,
+        subject: 'Reseteo de contraseña',
+        html: `Haz clic <a href="${resetURL}">aquí</a> para resetear tu contraseña. Este enlace expira en 1 hora.`
+      });
+      return res.render('forgot', { success: successMsg, error: null, csrfToken: req.csrfToken() });
+    } catch (error) {
+      return res.render('forgot', { error: 'Error al enviar el email.', success: null, csrfToken: req.csrfToken() });
+    }
+  });
 });
 
-app.get('/reset/:token', (req, res) => {
-    const { token } = req.params;
-    db.get('SELECT * FROM users WHERE resetToken = ? AND resetTokenExpires > ?', [token, Date.now()], (err, user) => {
-        if (!user) return res.status(400).send('Token inválido o expirado.');
-        res.render('reset', { token, error: null });
-    });
+app.get('/reset/:token', csrfProtection, (req, res) => {
+  const { token } = req.params;
+  db.get('SELECT * FROM users WHERE resetToken = ? AND resetTokenExpires > ?', [token, Date.now()], (err, user) => {
+    if (!user) return res.status(400).send('Token inválido o expirado.');
+    return res.render('reset', { token, error: null, csrfToken: req.csrfToken() });
+  });
 });
 
-app.post('/reset/:token', async (req, res) => {
-    const { token } = req.params;
-    const { password } = req.body;
-    db.get('SELECT * FROM users WHERE resetToken = ? AND resetTokenExpires > ?', [token, Date.now()], async (err, user) => {
-        if (!user) return res.render('reset', { token, error: 'Token inválido o expirado.' });
-        const hashedPassword = await bcrypt.hash(password, 10);
-        db.run('UPDATE users SET password = ?, resetToken = NULL, resetTokenExpires = NULL WHERE id = ?', [hashedPassword, user.id], () => {
-            res.redirect('/login?success=Contraseña+actualizada+con+éxito');
-        });
+app.post('/reset/:token', csrfProtection, async (req, res) => {
+  const { token } = req.params;
+  const { password } = req.body;
+  if (!password || String(password).length < 8) {
+    return res.render('reset', { token, error: 'La contraseña debe tener al menos 8 caracteres.', csrfToken: req.csrfToken() });
+  }
+  db.get('SELECT * FROM users WHERE resetToken = ? AND resetTokenExpires > ?', [token, Date.now()], async (err, user) => {
+    if (!user) return res.render('reset', { token, error: 'Token inválido o expirado.', csrfToken: req.csrfToken() });
+    const hashed = await bcrypt.hash(password, 12);
+    db.run('UPDATE users SET password = ?, resetToken = NULL, resetTokenExpires = NULL WHERE id = ?', [hashed, user.id], () => {
+      return res.redirect('/login?success=Contraseña+actualizada');
     });
+  });
 });
 
 app.get('/dashboard', isAuthenticated, (req, res) => {
-    db.get('SELECT email FROM users WHERE id = ?', [req.session.userId], (err, user) => {
-        if (!user) return res.redirect('/login');
-        res.render('dashboard', { user });
-    });
+  db.get('SELECT email FROM users WHERE id = ?', [req.session.userId], (err, user) => {
+    if (!user) return res.redirect('/login');
+    return res.render('dashboard', { user });
+  });
 });
 
-// --- Server Start ---
-app.listen(port, () => console.log(`Panel de control escuchando en http://localhost:${port}`));
-# --- FIN DEL CÓDIGO PARA app.js ---
+// Healthcheck simple
+app.get('/healthz', (_req, res) => res.status(200).json({ ok: true }));
 
+// 404 y error handler
+app.use((req, res) => res.status(404).send('No encontrado'));
+app.use((err, _req, res, _next) => {
+  console.error('Unhandled error:', err);
+  res.status(500).send('Error en el servidor');
+});
 
-# -------------------------------------------------------------------
-# PASO 10: INICIAR LA APLICACIÓN CON PM2
-# -------------------------------------------------------------------
-# Esto pondrá tu panel a funcionar 24/7.
+app.listen(PORT, () => console.log(`Panel escuchando en http://localhost:${PORT}`));
+```
 
-# Asegúrate de estar en /app/panel-project
+---
+
+## 7) Nginx como reverse proxy (con WebSocket y cabeceras)
+
+Archivo: `/etc/nginx/sites-available/panel.cloudevx.space`
+
+```nginx
+server {
+    listen 80;
+    listen [::]:80;
+    server_name panel.cloudevx.space;
+
+    # Redirige HTTP→HTTPS si usas Certbot/SSL en el origen
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name panel.cloudevx.space;
+
+    # SSL: si usas Certbot, estos paths los gestiona automáticamente
+    ssl_certificate     /etc/letsencrypt/live/panel.cloudevx.space/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/panel.cloudevx.space/privkey.pem;
+
+    # Seguridad TLS básica
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers on;
+
+    # Proxy a Node
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+    }
+
+    # Archivos estáticos (opcional microcache)
+    location ~* \.(js|css|png|jpg|jpeg|gif|svg|ico)$ {
+        expires 7d;
+        add_header Cache-Control "public";
+        try_files $uri @app;
+    }
+    location @app {
+        proxy_pass http://127.0.0.1:3000;
+    }
+}
+```
+
+Activación:
+
+```bash
+sudo ln -s /etc/nginx/sites-available/panel.cloudevx.space /etc/nginx/sites-enabled/
+# borra default si existe
+sudo rm -f /etc/nginx/sites-enabled/default
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+> **Cloudflare + SSL**:
+>
+> * Si mantienes **proxy naranja**, para usar **Certbot HTTP-01** deberás temporalmente poner el registro **DNS only** (nube gris) mientras emites/renuevas el cert, o usar **DNS challenge**. Alternativa robusta: **Origin Certificate** de Cloudflare y modo SSL **Full (strict)**.
+
+---
+
+## 8) Certificados SSL (elige una opción)
+
+**Opción A — Certbot (Let’s Encrypt)**
+
+```bash
+sudo snap install --classic certbot
+sudo ln -s /snap/bin/certbot /usr/bin/certbot
+sudo certbot --nginx -d panel.cloudevx.space --non-interactive --agree-tos -m tu-email@ejemplo.com --redirect
+sudo systemctl reload nginx
+```
+
+**Opción B — Cloudflare Origin CA (recomendada con proxy naranja)**
+
+1. En Cloudflare: **SSL/TLS → Origin Server → Create certificate** (RSA 2048, 15 años).
+2. Pega el **cert** en `/etc/ssl/cf-origin.crt` y la **clave** en `/etc/ssl/cf-origin.key`.
+3. Cambia en Nginx `ssl_certificate` y `ssl_certificate_key` a esos paths.
+4. En Cloudflare: modo SSL **Full (strict)**.
+
+---
+
+## 9) Arranque en producción con PM2
+
+Instala PM2 global y configura arranque:
+
+```bash
+sudo npm i -g pm2
 cd /app/panel-project
-
-# Inicia la app con el nombre "panel"
 pm2 start app.js --name panel
-
-# Guarda la lista de procesos de PM2 para que se reinicien con el servidor
 pm2 save
+pm2 startup systemd -u $USER --hp $HOME
+# sigue las instrucciones que muestre y ejecuta el comando sugerido
+```
 
-# Revisa que todo esté funcionando
+Comandos útiles:
+
+```bash
 pm2 status
 pm2 logs panel
+pm2 restart panel
+```
 
-# ¡Y LISTO!
-# Si seguiste todos los pasos, ahora deberías poder ir a
-# https://cloudevx.space y ver tu panel de login.
-# ¡Felicitaciones!
+---
+
+## 10) Pruebas finales
+
+* **Turnstile**: en `/login` verifica que aparece y que, si fallas, devuelve mensaje controlado.
+* **Registro/Login**: crea cuenta, cierra sesión, vuelve a entrar.
+* **Resend**: en `/forgot` envía enlace; verifica en el dashboard de Resend **Activity**.
+* **CSP**: revisa consola del navegador por bloqueos; si añades scripts, ajusta directivas.
+
+---
+
+## 11) Backups y mantenimiento
+
+* **SQLite**: copia en caliente con WAL habilitado:
+
+  ```bash
+  sqlite3 var/database.db ".backup '/root/backups/database-$(date +%F).db'"
+  ```
+* **Logs**: rota `pm2 logs` o instala `logrotate`.
+* **Dependencias**: revisa `npm audit` en cada release.
+
+---
+
+## 12) Solución de problemas comunes
+
+* **401 con Resend** → Header faltante o token mal copiado. Debe ser `Authorization: Bearer re_...`.
+* **403 al enviar email** → `MAIL_FROM` no pertenece a un dominio verificado en Resend.
+* **Turnstile “missing-input-secret/response”** → comprueba que el widget envía `cf-turnstile-response` y que las claves están en `.env`.
+* **Nginx 502** → app caída o puerto incorrecto. `pm2 logs panel`, valida `proxy_pass`.
+* **Cookies no persisten** → si estás tras Cloudflare, `TRUST_PROXY=1` en `.env` y `COOKIE_SECURE=true` solo en HTTPS.
+
+---
+
+## 13) Checklist de endurecimiento
+
+* Rotación de claves expuestas (Turnstile/Resend) y `.env` fuera del repo.
+* Rate limiting en `/login`, `/register`, `/forgot`.
+* CSRF activo con tokens en formularios.
+* CSP definida y mínima.
+* `X-Frame-Options` implícita via Helmet (o `frame-ancestors` en CSP).
+* WAF en Cloudflare con reglas de bots según tráfico.
+* (Avanzado) `set_real_ip_from` para Cloudflare en Nginx y usar `CF-Connecting-IP` como IP real.
+
+---
+
+### Fin de la guía. Cualquier section puede copiarse/pegarse tal cual en tu servidor.
